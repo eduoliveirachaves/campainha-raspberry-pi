@@ -2,7 +2,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 if [[ ! -f pc.json ]]; then
-    printf 'No computador, execute bash scripts/preparar_recebimento.sh (ou edu pi, se configurado).\n' >&2
+    printf 'No computador, execute bash src/preparar_recebimento.sh, na raiz do projeto (ou edu pi, se configurado).\n' >&2
     exit 1
 fi
 /usr/bin/python3 enviar_fotos.py --verificar "$@"

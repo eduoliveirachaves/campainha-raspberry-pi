@@ -13,7 +13,7 @@ import time
 
 import requests
 
-from campainha import Campainha, enviar_http, validar_backend
+from main import Campainha, enviar_http, validar_backend
 
 MAX_TENTATIVAS = 3
 
@@ -79,7 +79,7 @@ def main():
                                     headers={"Authorization": "Bearer " + token}, timeout=2)
             resposta.raise_for_status()
         except requests.RequestException:
-            raise SystemExit("Recebimento do PC indisponível. No computador: bash scripts/preparar_recebimento.sh (ou edu pi, se configurado).") from None
+            raise SystemExit("Recebimento do PC indisponível. No computador: bash src/preparar_recebimento.sh (ou edu pi, se configurado).") from None
         return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s ENVIO %(message)s", datefmt="%H:%M:%S")
     parar = threading.Event()
