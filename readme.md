@@ -8,7 +8,7 @@ A campainha fotografa o visitante ao pressionar o botão e emite um aviso sonoro
 
 [Baixar o ZIP para anexar](entrega/campainha-entrega.zip) · [Consultar a proposta em PDF](entrega/campainha-raspberry-pi-projeto.pdf)
 
-O ZIP contém o PDF e todos os fontes em `src/`, sem testes nem README.
+O ZIP destinado ao professor contém somente a proposta em PDF e `main.py`, o programa embarcado completo para botão, buzzer e câmera. Não inclui testes, README, scripts de apoio, dependências ou facilitadores de transferência.
 
 ## Organização
 
