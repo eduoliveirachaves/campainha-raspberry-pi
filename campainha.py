@@ -1,23 +1,14 @@
 #!/usr/bin/env python3
-"""Campainha com botão (BCM17), PIR (BCM27), LED (BCM23) e câmera CSI.
+"""Fila, persistência SQLite e transporte HTTP da campainha.
 
-Na placa: instalar python3-gpiozero e python3-picamera2 pelo apt.
-Executar: python3 campainha.py
-Testar a lógica sem hardware: python3 -m unittest discover -v
-
-BACKEND_URL é a URL completa de recebimento (por exemplo, /eventos).
-BACKEND_TOKEN configura o Bearer token. Sem URL, a operação é só local.
-O backend deve aceitar multipart com id, origem, criado_em, erro e foto
-(opcional), devolver JSON com o mesmo id e evitar duplicatas desse id.
+A execução do hardware fica em main.py. Este módulo mantém os eventos,
+processa uma captura por vez e preserva as fotos ainda não enviadas.
 """
 
-import argparse
 import contextlib
 import logging
-import os
 from pathlib import Path
 import shutil
-import signal
 import sqlite3
 import threading
 import time
@@ -77,7 +68,6 @@ class Campainha:
                 )
             if origem == "movimento":
                 self.ultimo_movimento = agora
-        logging.info("Acionamento registrado: %s (%s)", identificador, origem)
         return identificador
 
     def evento(self, identificador):
@@ -104,7 +94,7 @@ class Campainha:
             raise RuntimeError("Espaço livre insuficiente para uma nova foto")
 
     def processar(self):
-        # Só a thread de captura chama este método; botão precede PIR na fila.
+        # Só a thread de captura chama este método; processar um evento por vez.
         with self.banco() as banco:
             linha = banco.execute("""
                 SELECT * FROM eventos WHERE estado = 'aguardando'
@@ -112,7 +102,12 @@ class Campainha:
             """).fetchone()
         if linha is None:
             return False
-        arquivo = self.pasta / (linha["id"] + ".jpg")
+        arquivo = self.pasta / datetime.now().strftime("%H-%M-%S__%d-%m.jpg")
+        # Capturas no mesmo segundo nunca sobrescrevem uma foto já salva.
+        while arquivo.exists():
+            time.sleep(0.05)
+            arquivo = self.pasta / datetime.now().strftime("%H-%M-%S__%d-%m.jpg")
+        logging.info("Iniciando captura: %s (%s)", arquivo.name, linha["origem"])
         erro = ""
         try:
             self.liberar_espaco()
@@ -122,7 +117,7 @@ class Campainha:
         except (OSError, RuntimeError) as falha:
             arquivo.unlink(missing_ok=True)
             erro = str(falha)
-            logging.warning("Falha de captura para %s: %s", linha["id"], erro)
+            logging.warning("Falha de captura para %s: %s", arquivo.name, erro)
         with self.banco() as banco:
             banco.execute(
                 "UPDATE eventos SET estado = ?, foto = ?, erro = ? WHERE id = ?",
@@ -145,7 +140,7 @@ class Campainha:
         with self.banco() as banco:
             banco.execute("UPDATE eventos SET enviado = 1 WHERE id = ?",
                           (registro["id"],))
-        logging.info("Evento enviado: %s", registro["id"])
+        logging.info("Evento enviado: %s", Path(registro["foto"]).name if registro["foto"] else "evento sem foto")
         return True
 
 
@@ -180,98 +175,3 @@ def enviar_http(url, token, registro, foto):
     confirmacao = resposta.json()
     if not isinstance(confirmacao, dict) or confirmacao.get("id") != registro["id"]:
         raise ValueError("O backend não confirmou o identificador do evento")
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--pasta", type=Path,
-                        default=Path.home() / ".local/share/campainha")
-    parser.add_argument("--max-fotos", type=int, default=200)
-    args = parser.parse_args()
-    url = os.environ.get("BACKEND_URL", "")
-    token = os.environ.get("BACKEND_TOKEN", "")
-    if url:
-        validar_backend(url, token)
-
-    # Esses módulos só são necessários ao executar na placa, não nos testes locais.
-    import fcntl
-    from gpiozero import Button, LED, MotionSensor
-    from picamera2 import Picamera2
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    parar = threading.Event()
-    for sinal in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sinal, lambda *_: parar.set())
-
-    with contextlib.ExitStack() as recursos:
-        args.pasta = args.pasta.expanduser().resolve()
-        args.pasta.mkdir(parents=True, exist_ok=True)
-        bloqueio = recursos.enter_context((args.pasta / "execucao.lock").open("a"))
-        fcntl.flock(bloqueio, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        botao = recursos.enter_context(Button(17, bounce_time=0.05))
-        pir = recursos.enter_context(MotionSensor(27))
-        led = recursos.enter_context(LED(23))
-        camera = Picamera2()
-        recursos.callback(camera.close)
-        camera.configure(camera.create_still_configuration(main={"size": (1024, 768)}))
-        camera.start()
-        parar.wait(2)  # Aguardar estabilização inicial de exposição e balanço de branco.
-
-        def capturar(arquivo):
-            led.on()
-            try:
-                camera.capture_file(str(arquivo))
-            finally:
-                led.off()
-
-        sistema = Campainha(args.pasta, capturar, max_fotos=args.max_fotos)
-
-        def registrar(origem):
-            try:
-                sistema.registrar(origem)
-            except (OSError, sqlite3.Error):
-                logging.exception("Não foi possível registrar o acionamento")
-
-        def capturas():
-            while not parar.is_set():
-                try:
-                    if not sistema.processar():
-                        parar.wait(0.2)
-                except (OSError, RuntimeError, sqlite3.Error):
-                    logging.exception("Falha no processamento local")
-                    parar.wait(1)
-
-        def envios():
-            import requests
-
-            while not parar.is_set():
-                try:
-                    if not sistema.enviar(lambda registro, foto:
-                                          enviar_http(url, token, registro, foto)):
-                        parar.wait(1)
-                except (requests.RequestException, OSError, ValueError, sqlite3.Error):
-                    logging.warning("Envio pendente; nova tentativa em 30 segundos")
-                    parar.wait(30)
-
-        trabalhadores = [threading.Thread(target=capturas, name="captura")]
-        if url:
-            import requests  # Detectar dependência ausente antes de iniciar as threads.
-            trabalhadores.append(threading.Thread(target=envios, name="envio"))
-        botao.when_pressed = lambda: registrar("botao")
-        pir.when_motion = lambda: registrar("movimento")
-        for trabalhador in trabalhadores:
-            trabalhador.start()
-        logging.info("Campainha ativa; envio ao backend %s", "ligado" if url else "desligado")
-        try:
-            parar.wait()
-        finally:
-            botao.when_pressed = None
-            pir.when_motion = None
-            parar.set()
-            for trabalhador in trabalhadores:
-                trabalhador.join()
-
-
-if __name__ == "__main__":
-    main()
